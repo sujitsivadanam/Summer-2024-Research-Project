@@ -1,0 +1,341 @@
+---
+title: "Summer Research Project (2009 NFL Season)"
+author: "Sujit Sivadanam"
+date: "2024-05-29"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Loading the Dataset
+
+```{r}
+#play_by_play <- read.csv("./NFL Play by Play 2009-2017 (v4).csv")
+play_by_play <- read.csv("2009_nfl_season.csv")
+
+#play_by_play$Year <- format(as.Date(play_by_play$Date), "%Y")
+#write.csv(play_by_play %>% filter(Year == 2017), row.names=F, file="2017_nfl_season.csv")
+```
+
+## Necessary Packages
+
+```{r}
+library(dplyr)
+library(tidyverse)
+```
+
+## Store original number of games
+```{r}
+n <- length(unique(play_by_play$GameID))
+```
+
+## Removing certain rows
+
+```{r}
+## Sanity check: where Drive numbers are out of order
+# drive.not.order <- play_by_play %>% group_by(GameID) %>% summarize(diff = diff(Drive)) %>% summarize(count.bad = sum(diff == -1)) #%>%
+#   #filter(diff < 0) #Difference is negative
+# length(unique(drive.not.order$GameID))
+# 
+# drive.not.order
+# 
+# View(play_by_play %>% filter(GameID %in% drive.not.order$GameID))
+# 
+# #
+# play_by_play %>% group_by(GameID) %>% summarize(diff = diff(Drive)) %>% 
+#   filter(diff == -1 & lag(diff) == 0)
+# 
+# View(play_by_play %>% filter(GameID == 2009091306))
+
+## Define Half variable
+play_by_play$Half <- ifelse(play_by_play$qtr %in% c(1,2),
+                            1,
+                            ifelse(play_by_play$qtr %in% c(3,4),
+                                   2,
+                                   "OT"))
+
+## where PlayType = "Timeout" or "Two Minute Warning"
+play_by_play <- play_by_play %>% 
+  filter(!(PlayType %in% c("Timeout", "Two Minute Warning")))
+
+## where PlayType = "Quarter End" and qtr = 1, 3
+play_by_play <- play_by_play %>%
+  filter(!(PlayType == "Quarter End" & qtr %in% c(1,3)))
+
+unique(play_by_play$PlayType)
+```
+
+## Convert Penalty.Yards into signed version (if posteam is penalized, sign is negative) within each drive
+
+```{r}
+#check <- play_by_play %>% filter(!is.na(PenalizedTeam) & Penalty.Yards == 0)
+
+play_by_play$Penalty.Yards <- ifelse(is.na(play_by_play$Penalty.Yards),
+                                     0, play_by_play$Penalty.Yards)
+
+## Assign sign to Penalty.Yards
+play_by_play$Penalty.Yards <- ifelse(play_by_play$posteam ==
+        play_by_play$PenalizedTeam, -1*play_by_play$Penalty.Yards,
+        play_by_play$Penalty.Yards)
+```
+
+## Variable describing field position change (yrdln[current]-yrdln[next]) within each game, each drive
+
+```{r}
+play_by_play$pos_net <- c(-1*diff(play_by_play$yrdline100), NA)
+
+## Locates where posteam changes
+# which(play_by_play$drive != lead(play_by_play$drive))
+
+play_by_play$pos_net[which(play_by_play$Drive != lead(play_by_play$Drive))] <- NA
+
+## Locate any mismatches between pos_net
+mismatch <- which(play_by_play$pos_net != play_by_play$Yards.Gained + play_by_play$Penalty.Yards)
+
+# View profile
+View(play_by_play[mismatch,] %>% select(Drive, posteam, yrdln, yrdline100, pos_net, Yards.Gained, Penalty.Yards, Accepted.Penalty, desc, PlayType, qtr))
+```
+
+## Create a Kickoff Return.Yards variable
+
+```{r}
+play_by_play$Return.Yards <- ifelse(play_by_play$PlayType == "Kickoff",
+                                    play_by_play$Yards.Gained, NA)
+
+mismatch_df <- play_by_play[mismatch,] %>% select(Drive, posteam, yrdln, yrdline100, pos_net, Yards.Gained, Return.Yards, Penalty.Yards, Accepted.Penalty, desc, PlayType, qtr) %>% filter(PlayType != "No Play")
+```
+
+## Create Fumble.Lost variable
+```{r}
+play_by_play$Fumble.Lost <- play_by_play$Fumble
+
+play_by_play$Fumble.Lost <- ifelse(play_by_play$Fumble == 1 & play_by_play$Drive != lead(play_by_play$Drive), 1, 0)
+```
+
+## Fumble Recovery for TD
+
+```{r}
+## All instances of a fumble recovered for touchdown
+fmb_td_index <- which(play_by_play$Touchdown == 1 & play_by_play$Fumble == 1 & play_by_play$Fumble.Lost == 0)
+
+## View
+View(play_by_play[sort(c(fmb_td_index, fmb_td_index+1, fmb_td_index-1)),] %>% 
+       select(posteam, DefensiveTeam, desc, down, PlayType, PosTeamScore, DefTeamScore))
+
+## All instances of fumble
+#table(play_by_play$PlayType[play_by_play$Fumble == 1])
+
+## All instances of a touchdown
+td_index <- which(play_by_play$Touchdown == 1)
+```
+
+## Create Home Team & Away Team Score and Points variables
+
+```{r}
+## Home.Team.Sc and Away.Team.Sc
+play_by_play$Home.Team.Sc <- ifelse(play_by_play$posteam == play_by_play$HomeTeam, play_by_play$PosTeamScore, play_by_play$DefTeamScore)
+
+play_by_play$Away.Team.Sc <- ifelse(play_by_play$posteam == play_by_play$AwayTeam, play_by_play$PosTeamScore, play_by_play$DefTeamScore)
+
+## Home.Team.Points and Away.Team.Points
+play_by_play$Home.Team.Points <- c(diff(play_by_play$Home.Team.Sc), NA)
+play_by_play$Away.Team.Points <- c(diff(play_by_play$Away.Team.Sc), NA)
+
+# Makes sure that differences don't include different games
+play_by_play$Home.Team.Points[which(play_by_play$GameID != lead(play_by_play$GameID))] <- NA
+play_by_play$Away.Team.Points[which(play_by_play$GameID != lead(play_by_play$GameID))] <- NA
+
+## Assign 3 points to home and away teams where their score is NA & field goal made
+home_away_NAs <- which(is.na(play_by_play$Home.Team.Points) & play_by_play$FieldGoalResult == "Good")
+
+play_by_play$Home.Team.Points[home_away_NAs] <- ifelse(play_by_play$posteam[home_away_NAs] == play_by_play$HomeTeam[home_away_NAs], 3, 0)
+
+play_by_play$Away.Team.Points[home_away_NAs] <- ifelse(play_by_play$posteam[home_away_NAs] == play_by_play$AwayTeam[home_away_NAs], 3, 0)
+
+## Assign 6 points to home and away teams where their score is NA & TD scored
+TD_home_away_NAs  <- which(is.na(play_by_play$Home.Team.Points) &
+                             play_by_play$Touchdown == 1)
+
+play_by_play$Home.Team.Points[TD_home_away_NAs] <- ifelse(play_by_play$posteam[TD_home_away_NAs] == play_by_play$HomeTeam[TD_home_away_NAs], 6, 0)
+
+play_by_play$Away.Team.Points[TD_home_away_NAs] <- ifelse(play_by_play$posteam[TD_home_away_NAs] == play_by_play$AwayTeam[TD_home_away_NAs], 6, 0)
+# We're yet to know if these TDs are offensive or defensive
+
+## Assign 2 points to home and away teams where their score is NA & safety scored
+sfty_NAs <- which(is.na(play_by_play$Home.Team.Points) & play_by_play$Safety == 1)
+
+play_by_play$Home.Team.Points[sfty_NAs] <- ifelse(
+  play_by_play$DefensiveTeam[sfty_NAs] == play_by_play$HomeTeam[sfty_NAs], 2, 0)
+
+play_by_play$Away.Team.Points[sfty_NAs] <- ifelse(
+  play_by_play$DefensiveTeam[sfty_NAs] == play_by_play$AwayTeam[sfty_NAs], 2, 0)
+
+## Remove the half where TD and Safety == 1
+badIndex <- which(play_by_play$Touchdown == 1 & play_by_play$Safety == 1)
+play_by_play <- play_by_play %>% filter(!(play_by_play$GameID %in% play_by_play$GameID[badIndex]))
+```
+
+## Convert Punting team into Defensive Team
+
+```{r}
+## Check for "clean" punts that are NOT of "Punt" playtype
+clean.punt <- which(!is.na(play_by_play$PuntResult) & play_by_play$PlayType != "Punt")
+
+## Sanity check to see if drive no. of punt play is different from drive no. of next play
+bad.punt.indx <- which(play_by_play$PlayType == "Punt" & play_by_play$Drive == lead(play_by_play$Drive) & !str_detect(tolower(play_by_play$desc), "fake punt"))
+
+## Removes instances of the above
+badGameIDs <- play_by_play$GameID[bad.punt.indx]
+play_by_play <- play_by_play %>% filter(!(GameID %in% badGameIDs))
+
+## Instances of punt plays
+#punt_indx <- which(play_by_play$PlayType == "Punt" & play_by_play$Drive != lead(play_by_play$Drive))
+
+## Punt not followed by 2 consecutive plays of same drive
+punt_indx2 <- which(!is.na(play_by_play$PuntResult) & !(play_by_play$Drive == lead(play_by_play$Drive) & play_by_play$Drive == lead(play_by_play$Drive, 2)))
+
+#View(play_by_play[sort(c(punt_indx2-1,punt_indx2,punt_indx2+1)),] %>% select(GameID, qtr, Drive, posteam, DefensiveTeam, desc))
+
+
+# Switches
+play_by_play[punt_indx2, c("posteam", "DefensiveTeam", "PosTeamScore", "DefTeamScore")] <- play_by_play[punt_indx2, c("DefensiveTeam", "posteam", "DefTeamScore", "PosTeamScore")]
+
+## Change drive number into the next drive number
+play_by_play$Drive[punt_indx2] <- play_by_play$Drive[punt_indx2]+1
+
+View(play_by_play)
+```
+
+## Create Pos.Team.Points variable
+
+```{r}
+play_by_play$Pos.Team.Points <- ifelse(play_by_play$posteam == play_by_play$HomeTeam,
+                                       ifelse(play_by_play$Home.Team.Points >= play_by_play$Away.Team.Points,
+                                              play_by_play$Home.Team.Points,
+                                              -1*play_by_play$Away.Team.Points),
+                                       ifelse(play_by_play$Away.Team.Points >= play_by_play$Home.Team.Points,
+                                              play_by_play$Away.Team.Points,
+                                              -1*play_by_play$Home.Team.Points))
+
+## View at instances of touchdowns
+View(play_by_play[sort(c(td_index, td_index+1)),] %>%
+       select(posteam, DefensiveTeam, desc, down, PlayType, PosTeamScore, DefTeamScore, Home.Team.Sc, Away.Team.Sc, Home.Team.Points, Away.Team.Points, Pos.Team.Points))
+
+## View at instances of safety
+View(play_by_play[which(play_by_play$Safety == 1),] %>%
+       select(posteam, DefensiveTeam, desc, down, PlayType, PosTeamScore, DefTeamScore, Home.Team.Sc, Away.Team.Sc, Home.Team.Points, Away.Team.Points, Pos.Team.Points))
+```
+
+## Extracting last play for each drive of every Game
+
+```{r}
+## Alternative way -- Right Here
+last.play.drive <- play_by_play %>% group_by(GameID, Drive) %>% summarize(nxt.drive.first.play = head(PlayType,1), nxt.drive.punt.result = head(PuntResult,1), points = tail(Pos.Team.Points,1), qtr = tail(qtr,1), down = tail(down,1), PlayType = tail(PlayType,1), desc = tail(desc,1), Fumble.Lost = tail(Fumble.Lost,1), InterceptionThrown = tail(InterceptionThrown,1), FieldGoalResult = tail(FieldGoalResult,1), ChalReplayResult = tail(ChalReplayResult,1), TwoPointConv = tail(TwoPointConv,1)) %>% ungroup() %>% mutate(nxt.drive.first.play = lead(nxt.drive.first.play), nxt.drive.punt.result = lead(nxt.drive.punt.result), .by="GameID")
+
+## Last play was 6 points without extra point following it
+no.xtra.pts <- last.play.drive %>% filter(points == 6)
+
+bad.drive.end <- play_by_play %>% filter(GameID %in% no.xtra.pts$GameID) %>% group_by(GameID) %>% summarize(last.drive = tail(Drive,1)) %>% left_join(no.xtra.pts) %>% 
+  filter(last.drive != Drive) %>% .[["GameID"]]
+
+## Removing bad.drive.end (GameID) games from play_by_play
+play_by_play <- play_by_play %>% filter(!(GameID %in% bad.drive.end))
+```
+
+## Sanity Check
+
+```{r}
+# Sanity check: remove extra points not following a touchdown
+# bad.ex.pts <- which(play_by_play$PlayType == "Extra Point" & lag(play_by_play$Pos.Team.Points) == -6)
+# 
+# # Switch posteam and DefTeam at preceding indices and make Pos.Team.Points positive
+# play_by_play[bad.ex.pts-1, c("posteam", "DefensiveTeam", "PosTeamScore", "DefTeamScore")] <- play_by_play[bad.ex.pts-1, c("DefensiveTeam", "posteam", "DefTeamScore", "PosTeamScore")]
+# 
+# play_by_play$Pos.Team.Points[bad.ex.pts-1] <- -1*play_by_play$Pos.Team.Points[bad.ex.pts-1]
+# 
+# #
+# play_by_play %>% group_by(GameID, Drive) %>% 
+#   summarize(Drive.Points = sum(Pos.Team.Points)) %>%
+#   filter(Drive.Points == 5) #%>% .[["Drive.Points"]] %>% table()
+# 
+# View(play_by_play %>% filter(GameID == 2009091303 & Drive %in% c(20, 21)))
+```
+
+## Drive Outcome for Obvious Cases
+
+```{r}
+## Initializing drive outcome
+last.play.drive$Drive.Outcome <- NA
+
+## When last.play.points = 3 (field goal)
+last.play.drive$Drive.Outcome[last.play.drive$points == 3] <- "Made Field Goal"
+
+## When last.play.points = -2 (safety)
+last.play.drive$Drive.Outcome[last.play.drive$points == -2] <- "Safety"
+
+## When last.play.points = 1, 2, or 6 (off TD)
+last.play.drive$Drive.Outcome[last.play.drive$points %in% c(1,2,6) | last.play.drive$PlayType == "Extra Point" | !is.na(last.play.drive$TwoPointConv)] <- "Offensive Touchdown"
+
+## When last.play.points == -6 (def TD)
+last.play.drive$Drive.Outcome[last.play.drive$points == -6] <- "Defensive Touchdown"
+```
+
+## Tackle the 0 points case for Drive.Outcome
+
+```{r}
+#View(last.play.drive[last.play.drive$points == 0 & last.play.drive$Fumble == 1,])
+
+## Drive ends with half end
+last.play.drive$Drive.Outcome[(last.play.drive$PlayType %in% c("Half End", "End of Game")) | (last.play.drive$PlayType == "Quarter End" & last.play.drive$qtr %in% c(2,4,5))] <- "End of Half"
+
+## Drive ends with interception
+last.play.drive$Drive.Outcome[last.play.drive$points == 0 & last.play.drive$InterceptionThrown == 1] <- "Interception"
+
+## Drive ends with fumble
+#Change Fumble indicator to 0 due to reversal
+fmb_aft <- str_detect(str_remove_all(tolower(last.play.drive$desc), ".*reverse"), "fumble")
+last.play.drive$Fumble.Lost[!fmb_aft] <- 0
+
+last.play.drive$Drive.Outcome[last.play.drive$Fumble.Lost == 1] <- "Fumble"
+
+## Drive ends with missed or blocked field goal
+last.play.drive$Drive.Outcome[last.play.drive$FieldGoalResult %in% c("No Good", "Blocked")] <- "Missed Field Goal"
+
+## Drive ends with punt
+last.play.drive$Drive.Outcome[which(!is.na(last.play.drive$nxt.drive.punt.result))] <- "Punt"
+
+## Remove badly recorded games
+bad.record <- last.play.drive$GameID[which(!is.na(last.play.drive$nxt.drive.first.play) & last.play.drive$down != 4 & is.na(last.play.drive$Drive.Outcome))]
+
+play_by_play <- play_by_play %>% filter(!(GameID %in% bad.record))
+last.play.drive <- last.play.drive %>% filter(!(GameID %in% bad.record))
+
+## Drive ends with time running out
+last.play.drive$Drive.Outcome[which(((is.na(last.play.drive$nxt.drive.first.play) & last.play.drive$down != 4) | (last.play.drive$down == 4 & last.play.drive$PlayType == "Punt")) & is.na(last.play.drive$Drive.Outcome))] <- "End of Half"
+
+## Drive ends with turnover on downs
+last.play.drive$Drive.Outcome[is.na(last.play.drive$Drive.Outcome)] <- "Turnover on Downs"
+```
+
+## Last Play of Each Game
+
+```{r}
+## Extracting last row of each game
+last_play <- data.frame()
+for(game in unique(play_by_play$GameID)){
+  last_row <- tail(subset(play_by_play, GameID == game), n=1)
+  last_play <- rbind(last_play, last_row)
+}
+
+## Cases of last play of game has Home.Team.Points or Away.Team.Points != 0
+View(last_play %>% select(posteam, DefensiveTeam, desc, qtr, down, PlayType, Home.Team.Sc, Away.Team.Sc, Home.Team.Points, Away.Team.Points) %>%
+       filter(Home.Team.Points != 0 | Away.Team.Points != 0))
+```
+
+## Distribution of Drive Outcomes for each Season
+
+```{r}
+table(drive_df$PlayType)
+```
